@@ -1,6 +1,6 @@
 """
 FinStack API v1.0
-Unified Financial Data â Crypto Â· Stocks Â· Forex Â· Macro
+Unified Financial Data — Crypto · Stocks · Forex · Macro
 One API. One key. One format. Pre-computed indicators. AI-discoverable.
 
 Aggregates: CoinGecko, DeFiLlama, Alpha Vantage, FRED, ExchangeRate API, Alternative.me
@@ -19,15 +19,29 @@ from collections import defaultdict
 from flask import Flask, jsonify, request, Response, g
 import requests as upstream
 
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ══════════════════════════════════════════════════════════════════════
 # CONFIG
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ══════════════════════════════════════════════════════════════════════
 
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 FRED_KEY = os.environ.get("FRED_KEY", "")
 PORT = int(os.environ.get("PORT", 8000))
 ENV = os.environ.get("ENV", "development")
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+
+# RapidAPI proxy secret — set this in Railway env vars after creating your RapidAPI listing.
+# Every request through RapidAPI will carry this header; we reject anything that doesn't match.
+RAPIDAPI_PROXY_SECRET = os.environ.get("RAPIDAPI_PROXY_SECRET", "")
+
+# Map RapidAPI plan names (as they appear in X-RapidAPI-Subscription) to internal tiers.
+# Update these to match whatever you name your plans in the RapidAPI dashboard.
+RAPIDAPI_TIER_MAP = {
+    "FREE": "free",
+    "BASIC": "basic",
+    "PRO": "pro",
+    "ULTRA": "ultra",
+    "MEGA": "ultra",
+}
 
 # Rate limit config (per API key, per minute)
 RATE_LIMITS = {
@@ -38,9 +52,9 @@ RATE_LIMITS = {
     "internal": 9999, # internal/testing
 }
 
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ══════════════════════════════════════════════════════════════════════
 # APP SETUP
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ══════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
 
@@ -51,9 +65,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("finstack")
 
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-# CACHE â in-memory, production would use Redis
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ══════════════════════════════════════════════════════════════════════
+# CACHE — in-memory, production would use Redis
+# ══════════════════════════════════════════════════════════════════════
 
 _cache: dict[str, dict] = {}
 DEFAULT_TTL = 60
@@ -80,9 +94,9 @@ def cache_set(key: str, data, ttl: int = DEFAULT_TTL):
             del _cache[k]
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-# RATE LIMITER â sliding window per API key
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ══════════════════════════════════════════════════════════════════════
+# RATE LIMITER — sliding window per API key
+# ══════════════════════════════════════════════════════════════════════
 
 _rate_windows: dict[str, list[float]] = defaultdict(list)
 
@@ -104,9 +118,9 @@ def check_rate_limit(api_key: str, tier: str = "free") -> tuple[bool, int]:
     return True, limit - len(window) - 1
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-# MIDDLEWARE â auth, rate limit, CORS, request logging
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ══════════════════════════════════════════════════════════════════════
+# MIDDLEWARE — auth, rate limit, CORS, request logging
+# ══════════════════════════════════════════════════════════════════════
 
 # Paths that don't require auth
 PUBLIC_PATHS = {"/", "/health", "/llms.txt", "/ai-plugin.json", "/openapi.json",
@@ -121,22 +135,36 @@ def before_request_handler():
     if request.path in PUBLIC_PATHS:
         return
 
-    # Extract API key from header or query param
-    # RapidAPI sends it as X-RapidAPI-Proxy-Secret or the user sends X-API-Key
-    api_key = (
-        request.headers.get("X-RapidAPI-Proxy-Secret")
-        or request.headers.get("X-API-Key")
-        or request.args.get("apikey")
-    )
+    rapidapi_secret = request.headers.get("X-RapidAPI-Proxy-Secret")
+    rapidapi_user   = request.headers.get("X-RapidAPI-User", "anonymous")
+    rapidapi_sub    = request.headers.get("X-RapidAPI-Subscription", "FREE").upper()
 
-    if not api_key:
-        # Allow unauthenticated requests at free tier rate
-        api_key = request.remote_addr or "anonymous"
-        tier = "free"
+    # ── Path 1: Request arrived through RapidAPI proxy ──────────────────
+    if rapidapi_secret:
+        # If RAPIDAPI_PROXY_SECRET is configured, enforce it.
+        # Until you set it in Railway, all proxy requests are accepted.
+        if RAPIDAPI_PROXY_SECRET and rapidapi_secret != RAPIDAPI_PROXY_SECRET:
+            return jsonify({"error": "Invalid proxy secret"}), 403
+
+        api_key = f"rapidapi:{rapidapi_user}"
+        tier = RAPIDAPI_TIER_MAP.get(rapidapi_sub, "free")
+
+    # ── Path 2: Direct request (dev, testing, or bypassing RapidAPI) ────
     else:
-        # In production, look up tier from database
-        # For now, all authenticated requests get "basic" tier
-        tier = "basic"
+        # In production with a proxy secret configured, block direct access
+        # so users can't bypass RapidAPI billing.
+        if ENV == "production" and RAPIDAPI_PROXY_SECRET:
+            return jsonify({
+                "error": "Direct access disabled. Use the API via RapidAPI.",
+                "url": "https://rapidapi.com/search/finstack",
+            }), 403
+
+        direct_key = (
+            request.headers.get("X-API-Key")
+            or request.args.get("apikey")
+        )
+        api_key = direct_key or (request.remote_addr or "anonymous")
+        tier = "free"
 
     g.api_key = api_key
     g.tier = tier
@@ -148,7 +176,7 @@ def before_request_handler():
             "limit": RATE_LIMITS[tier],
             "window": "60 seconds",
             "tier": tier,
-            "upgrade": "Get higher limits at https://rapidapi.com/finstack/api/finstack",
+            "upgrade": "Get higher limits at https://rapidapi.com/search/finstack",
         }), 429
 
 
@@ -166,7 +194,7 @@ def after_request_handler(response):
     # Request logging
     duration = round((time.time() - g.get("start_time", time.time())) * 1000, 1)
     if request.path not in {"/health", "/favicon.ico"}:
-        log.info(f"{request.method} {request.path} â {response.status_code} ({duration}ms)")
+        log.info(f"{request.method} {request.path} → {response.status_code} ({duration}ms)")
 
     return response
 
@@ -182,9 +210,9 @@ def server_error(e):
     return jsonify({"error": "Internal server error"}), 500
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ══════════════════════════════════════════════════════════════════════
 # UPSTREAM FETCHER
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ══════════════════════════════════════════════════════════════════════
 
 def fetch(url: str, params: dict = None, headers: dict = None, timeout: int = 10):
     try:
@@ -215,9 +243,9 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ══════════════════════════════════════════════════════════════════════
 # TECHNICAL INDICATORS
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ══════════════════════════════════════════════════════════════════════
 
 def sma(prices: list[float], period: int) -> float | None:
     if len(prices) < period:
@@ -297,9 +325,9 @@ def indicators(prices: list[float]) -> dict:
     }
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 # CRYPTO ENDPOINTS
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 
 @app.route("/v1/crypto/prices")
 def crypto_prices():
@@ -404,7 +432,7 @@ def crypto_coins():
 
 @app.route("/v1/crypto/trending")
 def crypto_trending():
-    """Trending coins â most searched in the last 24h."""
+    """Trending coins — most searched in the last 24h."""
     k = ck("trending")
     c = cache_get(k)
     if c:
@@ -427,7 +455,7 @@ def crypto_trending():
 
 @app.route("/v1/crypto/fear-greed")
 def crypto_fear_greed():
-    """Crypto Fear & Greed Index â current value and recent history."""
+    """Crypto Fear & Greed Index — current value and recent history."""
     days = min(int(request.args.get("days", 10)), 90)
 
     k = ck("fg", days)
@@ -535,9 +563,9 @@ def crypto_global():
     return jsonify(result)
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 # FOREX ENDPOINTS
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 
 @app.route("/v1/forex/rates")
 def forex_rates():
@@ -586,9 +614,9 @@ def forex_convert():
     })
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 # STOCKS ENDPOINTS
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 
 @app.route("/v1/stocks/quote")
 def stock_quote():
@@ -710,9 +738,9 @@ def stock_search():
     return jsonify(result)
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 # MACRO ENDPOINTS
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 
 @app.route("/v1/macro/indicators")
 def macro_indicators():
@@ -762,9 +790,9 @@ def macro_indicators():
     return jsonify(result)
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-# OVERVIEW â THE KILLER ENDPOINT
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
+# OVERVIEW — THE KILLER ENDPOINT
+# ═══════════════════════════════════════════════════════════════
 
 @app.route("/v1/overview")
 def overview():
@@ -816,9 +844,9 @@ def overview():
     return jsonify(result)
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 # AI DISCOVERABILITY
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 
 @app.route("/llms.txt")
 def llms_txt():
@@ -856,16 +884,16 @@ def robots():
     return Response("User-agent: *\nAllow: /\nSitemap: /openapi.json\n", mimetype="text/plain")
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 # ROOT & HEALTH
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 
 @app.route("/")
 def root():
     return jsonify({
         "name": "FinStack API",
         "version": "1.0.0",
-        "tagline": "Unified financial data â crypto, stocks, forex, macro. One API, one key, one format.",
+        "tagline": "Unified financial data — crypto, stocks, orez, macro. One API, one key, one format.",
         "docs": "/openapi.json",
         "llms": "/llms.txt",
         "llms_full": "/llms-full.txt",
@@ -887,40 +915,41 @@ def health():
     return jsonify({"status": "ok", "cache_size": len(_cache), "version": "1.0.0"})
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
+════════════════════════════════
 # SPEC GENERATORS
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 
 def _generate_llms_txt():
     return """# FinStack API
-> Unified financial data API â crypto, stocks, forex, macro indicators. One key, one format, pre-computed technical indicators.
+> Unified financial data API — crypto, stocks, forex, macro indicators. One key, one format, pre-computed technical indicators.
 
 ## Endpoints
 
 ### Crypto
-- GET /v1/crypto/prices?coins=bitcoin,ethereum&vs=usd â Current prices, 24h change, market cap, volume
-- GET /v1/crypto/history?coin=bitcoin&days=30 â Price history + RSI, SMA, EMA, MACD, Bollinger Bands
-- GET /v1/crypto/coins?q=bit â Search available coins
-- GET /v1/crypto/trending â Most searched coins in last 24h
-- GET /v1/crypto/fear-greed?days=10 â Fear & Greed Index
-- GET /v1/crypto/defi?limit=25 â Top DeFi protocols by TVL
-- GET /v1/crypto/defi/chains â TVL by blockchain
-- GET /v1/crypto/global â Total market cap, BTC dominance
+- GET /v1/crypto/prices?coins=bitcoin,ethereum&vs=usd — Current prices, 24h change, market cap, volume
+- GET /v1/crypto/history?coin=bitcoin&days=30 — Price history + RSI, SMA, EMA, MACD, Bollinger Bands
+- GET /v1/crypto/coins?q=bit — Search available coins
+- GET /v1/crypto/trending — Most searched coins in last 24h
+- GET /v1/crypto/fear-greed?days=10 — Fear & Greed Index
+- GET /v1/crypto/defi?limit=25 — Top DeFi protocols by TVL
+- GET /v1/crypto/defi/chains — TVL by blockchain
+- GET /v1/crypto/global — Total market cap, BTC dominance
 
 ### Forex
-- GET /v1/forex/rates?base=USD&targets=EUR,GBP,NZD â Exchange rates (150+ currencies)
-- GET /v1/forex/convert?from=USD&to=NZD&amount=100 â Convert between currencies
+- GET /v1/forex/rates?base=USD&targets=EUR,GBP,NZD — Exchange rates (150+ currencies)
+- GET /v1/forex/convert?from=USD&to=NZD&amount=100 — Convert between currencies
 
 ### Stocks
-- GET /v1/stocks/quote?symbol=AAPL â Real-time quote
-- GET /v1/stocks/history?symbol=AAPL â Daily OHLCV + RSI, SMA, EMA, MACD, Bollinger
-- GET /v1/stocks/search?q=apple â Search symbols
+- GET /v1/stocks/quote?symbol=AAPL — Real-time quote
+- GET /v1/stocks/history?symbol=AAPL — Daily OHLCV + RSI, SMA, EMA, MACD, Bollinger
+- GET /v1/stocks/search?q=apple — Search symbols
 
 ### Macro
-- GET /v1/macro/indicators â GDP, CPI, unemployment, fed funds rate, 10Y & 2Y treasury, yield curve spread
+- GET /v1/macro/indicators — GDP, CPI, unemployment, fed funds rate, 10Y & 2Y treasury, yield curve spread
 
 ### Overview
-- GET /v1/overview â Full market snapshot in ONE call (crypto + forex + fear/greed + global stats)
+- GET /v1/overview — Full market snapshot in ONE call (crypto + forex + fear/greed + global stats)
 
 ## Response Format
 JSON. Every response includes `source` and `timestamp` fields. Technical indicators included where applicable.
@@ -928,7 +957,7 @@ JSON. Every response includes `source` and `timestamp` fields. Technical indicat
 
 
 def _generate_llms_full_txt():
-    return """# FinStack API â Full Documentation for AI Assistants
+    return """# FinStack API — Full Documentation for AI Assistants
 
 ## Integration Example (Python)
 ```python
@@ -1055,13 +1084,13 @@ def _generate_openapi():
     }
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 # RUN
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    log.info(f"ð FinStack API starting on port {PORT}")
-    log.info(f"ð Docs: http://localhost:{PORT}/openapi.json")
-    log.info(f"ð¤ AI discovery: http://localhost:{PORT}/llms.txt")
-    log.info(f"ð Endpoints: 16 total across crypto/forex/stocks/macro")
+    log.info(f"🚀 FinStack API starting on port {PORT}")
+    log.info(f"📄 Docs: http://localhost:{PORT}/openapi.json")
+    log.info(f"🤖 AI discovery: http://localhost:{PORT}/llms.txt")
+    log.info(f"📊 Endpoints: 16 total across crypto/forex/stocks/macro")
     app.run(host="0.0.0.0", port=PORT, debug=(ENV == "development"))
