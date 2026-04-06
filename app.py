@@ -38,6 +38,15 @@ def _yf_sess():
         _YF_SESSION = s
     return _YF_SESSION
 
+def _sf(v, d=4):
+    """Safe float: converts NaN/Inf/None to None, otherwise round to d digits."""
+    try:
+        if v is None: return None
+        f = float(v)
+        return None if (math.isnan(f) or math.isinf(f)) else round(f, d)
+    except (TypeError, ValueError):
+        return None
+
 # ══════════════════════════════════════════════════════════════════════
 # CONFIG
 # ══════════════════════════════════════════════════════════════════════
@@ -650,25 +659,25 @@ def stock_quote():
 
     try:
         fi = yf.Ticker(symbol, session=_yf_sess()).fast_info
-        price = fi.last_price
-        if not price:
-            return jsonify({"error": f"No data for '{symbol}'. Verify the ticker symbol.", "source": "yahoo_finance"}), 404
-        prev = fi.previous_close
-        change = round(price - prev, 4) if prev else None
+        price = _sf(fi.last_price)
+        if price is None:
+            return jsonify({"error": f"No data for '{symbol}'. Market may be closed or ticker invalid.", "source": "yahoo_finance"}), 404
+        prev = _sf(fi.previous_close)
+        change = round(price - prev, 4) if prev is not None else None
         change_pct = round((change / prev) * 100, 2) if prev and change else None
         result = {
             "symbol": symbol,
-            "price": round(price, 4),
+            "price": price,
             "change": change,
             "change_pct": change_pct,
-            "open": round(fi.open, 4) if fi.open else None,
-            "high": round(fi.day_high, 4) if fi.day_high else None,
-            "low": round(fi.day_low, 4) if fi.day_low else None,
-            "prev_close": round(prev, 4) if prev else None,
+            "open": _sf(fi.open),
+            "high": _sf(fi.day_high),
+            "low": _sf(fi.day_low),
+            "prev_close": _sf(prev, 4),
             "volume": fi.last_volume,
             "market_cap": fi.market_cap,
-            "fifty_two_week_high": round(fi.fifty_two_week_high, 4) if fi.fifty_two_week_high else None,
-            "fifty_two_week_low": round(fi.fifty_two_week_low, 4) if fi.fifty_two_week_low else None,
+            "fifty_two_week_high": _sf(fi.fifty_two_week_high),
+            "fifty_two_week_low": _sf(fi.fifty_two_week_low),
             "source": "yahoo_finance",
             "timestamp": now_iso(),
         }
