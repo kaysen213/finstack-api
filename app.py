@@ -638,7 +638,7 @@ def stock_quote():
     q = raw.get("Global Quote", {})
     if not q:
         note = raw.get("Note", raw.get("Information", ""))
-        if "call frequency" in str(note).lower():
+        if note and any(kw in str(note).lower() for kw in ["call frequency", "rate limit", "25 requests", "premium"]):
             return jsonify({"error": "Alpha Vantage rate limit hit. Free tier allows 25 requests/day. Upgrade your ALPHA_VANTAGE_KEY for more.", "source": "alphavantage"}), 429
         return jsonify({"error": f"No data for symbol '{symbol}'", "source": "alphavantage"}), 404
 
@@ -686,8 +686,8 @@ def stock_history():
     ts = raw.get("Time Series (Daily)", {})
     if not ts:
         note = raw.get("Note", raw.get("Information", ""))
-        if "call frequency" in str(note).lower():
-            return jsonify({"error": "Alpha Vantage rate limit. Free tier: 25 req/day.", "source": "alphavantage"}), 429
+        if note and any(kw in str(note).lower() for kw in ["call frequency", "rate limit", "25 requests", "premium"]):
+            return jsonify({"error": "Alpha Vantage rate limit hit. Free tier allows 25 requests/day. Upgrade your ALPHA_VANTAGE_KEY for more.", "source": "alphavantage"}), 429
         return jsonify({"error": f"No history for '{symbol}'", "source": "alphavantage"}), 404
 
     dates = sorted(ts.keys())
@@ -706,7 +706,7 @@ def stock_history():
         "history": history,
         "source": "alphavantage", "timestamp": now_iso(),
     }
-    cache_set(k, result, 900)
+    cache_set(k, result, 43200)  # 12h — daily OHLCV only changes at market close
     return jsonify(result)
 
 
