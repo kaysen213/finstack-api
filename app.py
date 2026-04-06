@@ -20,6 +20,24 @@ from collections import defaultdict
 from flask import Flask, jsonify, request, Response, g
 import requests as upstream
 
+# ── Yahoo Finance session: browser UA prevents cloud-IP blocks ──
+_YF_SESSION = None
+def _yf_sess():
+    global _YF_SESSION
+    if _YF_SESSION is None:
+        s = upstream.Session()
+        s.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        _YF_SESSION = s
+    return _YF_SESSION
+
 # ══════════════════════════════════════════════════════════════════════
 # CONFIG
 # ══════════════════════════════════════════════════════════════════════
@@ -631,7 +649,7 @@ def stock_quote():
         return jsonify(c)
 
     try:
-        fi = yf.Ticker(symbol).fast_info
+        fi = yf.Ticker(symbol, session=_yf_sess()).fast_info
         price = fi.last_price
         if not price:
             return jsonify({"error": f"No data for '{symbol}'. Verify the ticker symbol.", "source": "yahoo_finance"}), 404
@@ -679,7 +697,7 @@ def stock_history():
         return jsonify(c)
 
     try:
-        hist = yf.Ticker(symbol).history(period=period, interval=interval)
+        hist = yf.Ticker(symbol, session=_yf_sess()).history(period=period, interval=interval)
         if hist.empty:
             return jsonify({"error": f"No history for '{symbol}'. Verify the ticker.", "source": "yahoo_finance"}), 404
         records = [
@@ -717,7 +735,7 @@ def stock_search():
         return jsonify(c)
 
     try:
-        results = yf.Search(query, max_results=10).quotes
+        results = yf.Search(query, session=_yf_sess(), max_results=10).quotes
         matches = [
             {
                 "symbol":   q.get("symbol"),
