@@ -718,20 +718,31 @@ def stock_history():
         return jsonify(c)
 
     try:
-        hist = yf.Ticker(symbol, session=_yf_sess()).history(period=period, interval=interval)
-        if hist.empty:
+        # Direct Yahoo Finance chart API for history — avoids yfinance routing blocked on cloud IPs
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={period}"
+        resp = _yf_sess().get(url, timeout=20)
+        payload = resp.json()
+        chart = payload.get("chart", {})
+        err = chart.get("error")
+        results_list = chart.get("result")
+        if err or not results_list:
+            msg = err.get("description", "No data") if err else f"No history for '{symbol}'"
+            return jsonify({"error": msg, "symbol": symbol, "source": "yahoo_finance"}), 404
+        r0 = results_list[0]
+        timestamps = r0.get("timestamp", [])
+        ohlcv = r0["indicators"]["quote"][0]
+        if not timestamps:
             return jsonify({"error": f"No history for '{symbol}'. Verify the ticker.", "source": "yahoo_finance"}), 404
-        records = [
-            {
-                "date": str(date.date()),
-                "open":   round(float(row["Open"]),   4),
-                "high":   round(float(row["High"]),   4),
-                "low":    round(float(row["Low"]),    4),
-                "close":  round(float(row["Close"]),  4),
-                "volume": int(row["Volume"]),
-            }
-            for date, row in hist.iterrows()
-        ]
+        from datetime import date as _date
+        records = []
+        for i, ts in enumerate(timestamps):
+            o = _sf(ohlcv["open"][i]) if i < len(ohlcv.get("open", [])) else None
+            h = _sf(ohlcv["high"][i]) if i < len(ohlcv.get("high", [])) else None
+            l = _sf(ohlcv["low"][i]) if i < len(ohlcv.get("low", [])) else None
+            c = _sf(ohlcv["close"][i]) if i < len(ohlcv.get("close", [])) else None
+            v = ohlcv["volume"][i] if i < len(ohlcv.get("volume", [])) else None
+            if c is not None:
+                records.append({"date": str(_date.fromtimestamp(ts)), "open": o, "high": h, "low": l, "close": c, "volume": v})
     except Exception as e:
         return jsonify({"error": f"Failed to fetch history for '{symbol}': {str(e)}", "source": "yahoo_finance"}), 502
 
