@@ -7,6 +7,7 @@ Aggregates: CoinGecko, DeFiLlama, Alpha Vantage, FRED, ExchangeRate API, Alterna
 """
 
 import os
+import yfinance as yf
 import json
 import time
 import math
@@ -23,7 +24,6 @@ import requests as upstream
 # CONFIG
 # ══════════════════════════════════════════════════════════════════════
 
-ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 FRED_KEY = os.environ.get("FRED_KEY", "")
 PORT = int(os.environ.get("PORT", 8000))
 ENV = os.environ.get("ENV", "development")
@@ -620,7 +620,7 @@ def forex_convert():
 
 @app.route("/v1/stocks/quote")
 def stock_quote():
-    """Real-time stock quote."""
+    """Real-time stock quote via Yahoo Finance — no rate limits."""
     symbol = request.args.get("symbol", "").upper()
     if not symbol:
         return jsonify({"error": "symbol parameter required (e.g. ?symbol=AAPL)"}), 400
@@ -630,89 +630,83 @@ def stock_quote():
     if c:
         return jsonify(c)
 
-    raw = fetch("https://www.alphavantage.co/query",
-                params={"function": "GLOBAL_QUOTE", "symbol": symbol, "apikey": ALPHA_VANTAGE_KEY})
-    if is_error(raw):
-        return error_response(raw, "alphavantage")
-
-    q = raw.get("Global Quote", {})
-    if not q:
-        note = raw.get("Note", raw.get("Information", ""))
-        if note and any(kw in str(note).lower() for kw in ["call frequency", "rate limit", "25 requests", "premium"]):
-            return jsonify({"error": "Alpha Vantage rate limit hit. Free tier allows 25 requests/day. Upgrade your ALPHA_VANTAGE_KEY for more.", "source": "alphavantage"}), 429
-        return jsonify({"error": f"No data for symbol '{symbol}'", "source": "alphavantage"}), 404
-
     try:
+        fi = yf.Ticker(symbol).fast_info
+        price = fi.last_price
+        if not price:
+            return jsonify({"error": f"No data for '{symbol}'. Verify the ticker symbol.", "source": "yahoo_finance"}), 404
+        prev = fi.previous_close
+        change = round(price - prev, 4) if prev else None
+        change_pct = round((change / prev) * 100, 2) if prev and change else None
         result = {
-            "symbol": q.get("01. symbol"),
-            "price": float(q.get("05. price", 0)),
-            "open": float(q.get("02. open", 0)),
-            "high": float(q.get("03. high", 0)),
-            "low": float(q.get("04. low", 0)),
-            "volume": int(q.get("06. volume", 0)),
-            "prev_close": float(q.get("08. previous close", 0)),
-            "change": float(q.get("09. change", 0)),
-            "change_pct": float(q.get("10. change percent", "0%").replace("%", "")),
-            "latest_day": q.get("07. latest trading day"),
-            "source": "alphavantage", "timestamp": now_iso(),
+            "symbol": symbol,
+            "price": round(price, 4),
+            "change": change,
+            "change_pct": change_pct,
+            "open": round(fi.open, 4) if fi.open else None,
+            "high": round(fi.day_high, 4) if fi.day_high else None,
+            "low": round(fi.day_low, 4) if fi.day_low else None,
+            "prev_close": round(prev, 4) if prev else None,
+            "volume": fi.last_volume,
+            "market_cap": fi.market_cap,
+            "fifty_two_week_high": round(fi.fifty_two_week_high, 4) if fi.fifty_two_week_high else None,
+            "fifty_two_week_low": round(fi.fifty_two_week_low, 4) if fi.fifty_two_week_low else None,
+            "source": "yahoo_finance",
+            "timestamp": now_iso(),
         }
-    except (ValueError, TypeError) as e:
-        return jsonify({"error": f"Data parsing error: {e}", "source": "alphavantage"}), 502
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch '{symbol}': {str(e)}", "source": "yahoo_finance"}), 502
 
     cache_set(k, result, 60)
     return jsonify(result)
 
-
 @app.route("/v1/stocks/history")
 def stock_history():
-    """Daily stock history with technical indicators."""
+    """Daily OHLCV history via Yahoo Finance — no rate limits.
+    ?symbol=AAPL  &period=3mo  &interval=1d
+    period:   1d 5d 1mo 3mo 6mo 1y 2y 5y ytd max
+    interval: 1d 1wk 1mo
+    """
     symbol = request.args.get("symbol", "").upper()
     if not symbol:
         return jsonify({"error": "symbol parameter required"}), 400
-    size = request.args.get("outputsize", "compact")
+    period   = request.args.get("period", "3mo")
+    interval = request.args.get("interval", "1d")
 
-    k = ck("sh", symbol, size)
+    k = ck("sh", symbol, period, interval)
     c = cache_get(k)
     if c:
         return jsonify(c)
 
-    raw = fetch("https://www.alphavantage.co/query", params={
-        "function": "TIME_SERIES_DAILY", "symbol": symbol,
-        "outputsize": size, "apikey": ALPHA_VANTAGE_KEY,
-    })
-    if is_error(raw):
-        return error_response(raw, "alphavantage")
-
-    ts = raw.get("Time Series (Daily)", {})
-    if not ts:
-        note = raw.get("Note", raw.get("Information", ""))
-        if note and any(kw in str(note).lower() for kw in ["call frequency", "rate limit", "25 requests", "premium"]):
-            return jsonify({"error": "Alpha Vantage rate limit hit. Free tier allows 25 requests/day. Upgrade your ALPHA_VANTAGE_KEY for more.", "source": "alphavantage"}), 429
-        return jsonify({"error": f"No history for '{symbol}'", "source": "alphavantage"}), 404
-
-    dates = sorted(ts.keys())
-    closes = [float(ts[d]["4. close"]) for d in dates]
-
-    history = [{
-        "date": d,
-        "open": float(ts[d]["1. open"]), "high": float(ts[d]["2. high"]),
-        "low": float(ts[d]["3. low"]), "close": float(ts[d]["4. close"]),
-        "volume": int(ts[d]["5. volume"]),
-    } for d in dates[-60:]]
+    try:
+        hist = yf.Ticker(symbol).history(period=period, interval=interval)
+        if hist.empty:
+            return jsonify({"error": f"No history for '{symbol}'. Verify the ticker.", "source": "yahoo_finance"}), 404
+        records = [
+            {
+                "date": str(date.date()),
+                "open":   round(float(row["Open"]),   4),
+                "high":   round(float(row["High"]),   4),
+                "low":    round(float(row["Low"]),    4),
+                "close":  round(float(row["Close"]),  4),
+                "volume": int(row["Volume"]),
+            }
+            for date, row in hist.iterrows()
+        ]
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch history for '{symbol}': {str(e)}", "source": "yahoo_finance"}), 502
 
     result = {
-        "symbol": symbol, "data_points": len(history),
-        "indicators": indicators(closes),
-        "history": history,
-        "source": "alphavantage", "timestamp": now_iso(),
+        "symbol": symbol, "period": period, "interval": interval,
+        "count": len(records), "data": records,
+        "source": "yahoo_finance", "timestamp": now_iso(),
     }
-    cache_set(k, result, 43200)  # 12h — daily OHLCV only changes at market close
+    cache_set(k, result, 43200)  # 12h — daily data only changes at market close
     return jsonify(result)
-
 
 @app.route("/v1/stocks/search")
 def stock_search():
-    """Search for stock symbols by name or keyword."""
+    """Search for stock symbols by name or keyword via Yahoo Finance."""
     query = request.args.get("q", "")
     if not query:
         return jsonify({"error": "q parameter required (e.g. ?q=apple)"}), 400
@@ -722,25 +716,24 @@ def stock_search():
     if c:
         return jsonify(c)
 
-    raw = fetch("https://www.alphavantage.co/query",
-                params={"function": "SYMBOL_SEARCH", "keywords": query, "apikey": ALPHA_VANTAGE_KEY})
-    if is_error(raw):
-        return error_response(raw, "alphavantage")
+    try:
+        results = yf.Search(query, max_results=10).quotes
+        matches = [
+            {
+                "symbol":   q.get("symbol"),
+                "name":     q.get("shortname") or q.get("longname"),
+                "type":     q.get("quoteType"),
+                "exchange": q.get("exchange"),
+                "currency": q.get("currency"),
+            }
+            for q in results
+        ]
+    except Exception as e:
+        return jsonify({"error": f"Search failed: {str(e)}", "source": "yahoo_finance"}), 502
 
-    matches = [{
-        "symbol": m.get("1. symbol"), "name": m.get("2. name"),
-        "type": m.get("3. type"), "region": m.get("4. region"),
-        "currency": m.get("8. currency"),
-    } for m in raw.get("bestMatches", [])]
-
-    result = {"query": query, "results": matches, "count": len(matches), "source": "alphavantage", "timestamp": now_iso()}
+    result = {"query": query, "results": matches, "count": len(matches), "source": "yahoo_finance", "timestamp": now_iso()}
     cache_set(k, result, 3600)
     return jsonify(result)
-
-
-# ═══════════════════════════════════════════════════════════════
-# MACRO ENDPOINTS
-# ═══════════════════════════════════════════════════════════════
 
 @app.route("/v1/macro/indicators")
 def macro_indicators():
