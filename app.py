@@ -658,28 +658,40 @@ def stock_quote():
         return jsonify(c)
 
     try:
-        fi = yf.Ticker(symbol, session=_yf_sess()).fast_info
-        price = _sf(fi.last_price)
+        # Direct Yahoo Finance chart API — bypasses yfinance routing blocked on some cloud IPs
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=5d&includePrePost=false"
+        resp = _yf_sess().get(url, timeout=10)
+        payload = resp.json()
+        chart = payload.get("chart", {})
+        err = chart.get("error")
+        results_list = chart.get("result")
+        if err or not results_list:
+            msg = err.get("description", "No data") if err else f"No data for '{symbol}'"
+            return jsonify({"error": msg, "symbol": symbol, "source": "yahoo_finance"}), 404
+        meta = results_list[0]["meta"]
+        price      = _sf(meta.get("regularMarketPrice"))
+        prev       = _sf(meta.get("previousClose") or meta.get("chartPreviousClose"))
         if price is None:
-            return jsonify({"error": f"No data for '{symbol}'. Market may be closed or ticker invalid.", "source": "yahoo_finance"}), 404
-        prev = _sf(fi.previous_close)
-        change = round(price - prev, 4) if prev is not None else None
+            return jsonify({"error": f"No price data for '{symbol}'. Market may be closed.", "source": "yahoo_finance"}), 404
+        change     = round(price - prev, 4) if prev is not None else None
         change_pct = round((change / prev) * 100, 2) if prev and change else None
         result = {
-            "symbol": symbol,
+            "symbol": meta.get("symbol", symbol),
             "price": price,
             "change": change,
             "change_pct": change_pct,
-            "open": _sf(fi.open),
-            "high": _sf(fi.day_high),
-            "low": _sf(fi.day_low),
-            "prev_close": _sf(prev, 4),
-            "volume": fi.last_volume,
-            "market_cap": fi.market_cap,
-            "fifty_two_week_high": _sf(fi.fifty_two_week_high),
-            "fifty_two_week_low": _sf(fi.fifty_two_week_low),
-            "source": "yahoo_finance",
-            "timestamp": now_iso(),
+            "open": _sf(meta.get("regularMarketOpen")),
+            "high": _sf(meta.get("regularMarketDayHigh")),
+            "low": _sf(meta.get("regularMarketDayLow")),
+            "prev_close": prev,
+            "volume": meta.get("regularMarketVolume"),
+            "market_cap": None,
+            "fifty_two_week_high": _sf(meta.get("fiftyTwoWeekHigh")),
+            "fifty_two_week_low": _sf(meta.get("fiftyTwoWeekLow")),
+            "currency": meta.get("currency"),
+            "exchange": meta.get("exchangeName"),
+            "market_state": meta.get("marketState"),
+            "source": "yahoo_finance", "timestamp": now_iso(),
         }
     except Exception as e:
         return jsonify({"error": f"Failed to fetch '{symbol}': {str(e)}", "source": "yahoo_finance"}), 502
